@@ -115,6 +115,11 @@ async def _poll_updates(state: dict, timeout: int = 10) -> list:
     ]
 
 
+def _msg_header(state: dict, label: str) -> str:
+    project = state.get("project") or "general"
+    return f"--- {project} | {label} ---"
+
+
 def _is_command(text: str) -> bool:
     return text.startswith("/")
 
@@ -231,8 +236,7 @@ async def set_away_mode(active: bool, project: str = "") -> str:
 
         project_name = state.get("project") or "general"
         await _send_message(
-            f"Away mode activated\n"
-            f"Project: {project_name}\n\n"
+            f"{_msg_header(state, 'Away mode ON')}\n\n"
             f"I will send questions and updates here.\n"
             f"Commands: /back  /status"
         )
@@ -242,7 +246,7 @@ async def set_away_mode(active: bool, project: str = "") -> str:
             "Telegram notifications enabled."
         )
     else:
-        await _send_message("Away mode deactivated\nBack at the terminal.")
+        await _send_message(f"{_msg_header(state, 'Away mode OFF')}\n\nBack at the terminal.")
         _save_state(state)
         return "Away mode deactivated. Telegram notifications disabled."
 
@@ -262,8 +266,7 @@ async def send_question(question: str, timeout: int = 300) -> str:
             "Ask the user directly in the terminal instead."
         )
 
-    project_tag = f"[{state['project']}] " if state.get("project") else ""
-    await _send_message(f"{project_tag}Question\n\n{question}")
+    await _send_message(f"{_msg_header(state, 'Question')}\n\n{question}")
 
     start = time.monotonic()
     while time.monotonic() - start < timeout:
@@ -305,8 +308,7 @@ async def send_summary(summary: str) -> str:
             "Communicate with the user directly in the terminal."
         )
 
-    project_tag = f"[{state['project']}] " if state.get("project") else ""
-    await _send_message(f"{project_tag}Task complete\n\n{summary}")
+    await _send_message(f"{_msg_header(state, 'Task complete')}\n\n{summary}")
     return "Summary sent via Telegram."
 
 
