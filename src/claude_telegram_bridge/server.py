@@ -2,8 +2,13 @@
 Claude Code <-> Telegram bridge MCP server.
 
 Provides tools for Claude Code to communicate with the user via Telegram
-when they are away from the terminal. Activated/deactivated explicitly
+when they are away from the terminal.  Activated/deactivated explicitly
 so notifications only fire when the user has opted in.
+
+Supports concurrent Claude sessions via Telegram reply-to-message threading.
+Each session's questions/summaries get unique message IDs; the user
+swipe-replies to the specific message, and only the originating session
+picks up the reply.
 
 Environment variables required:
   TELEGRAM_BOT_TOKEN  - Bot token from @BotFather
@@ -26,6 +31,7 @@ mcp = FastMCP("claude-telegram-bridge")
 # ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_token() -> str:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -51,10 +57,17 @@ def _get_chat_id() -> str:
 # State persistence
 # ---------------------------------------------------------------------------
 
+
 def _load_state() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
-    return {"away": False, "project": None, "last_update_id": 0}
+    return {
+        "away": False,
+        "project": None,
+        "last_update_id": 0,
+        "buffered_messages": [],
+        "pending_replies": {},
+    }
 
 
 def _save_state(state: dict) -> None:
@@ -62,22 +75,49 @@ def _save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+def _drain_buffer(state: dict) -> list[str]:
+    """Return and clear all buffered messages."""
+    messages = state.get("buffered_messages", [])
+    state["buffered_messages"] = []
+    return messages
+
+
+def _buffer_messages(state: dict, texts: list[str]) -> None:
+    """Append message texts to the shared buffer."""
+    buf = state.setdefault("buffered_messages", [])
+    buf.extend(texts)
+
+
+def _store_pending_reply(state: dict, reply_to_id: int, text: str) -> None:
+    """Store a threaded reply keyed by the outgoing message it replies to."""
+    pending = state.setdefault("pending_replies", {})
+    key = str(reply_to_id)
+    pending.setdefault(key, []).append(text)
+
+
+def _collect_pending_replies(state: dict, message_id: int) -> list[str]:
+    """Collect and clear pending replies for a specific outgoing message_id."""
+    pending = state.get("pending_replies", {})
+    key = str(message_id)
+    return pending.pop(key, [])
+
+
 # ---------------------------------------------------------------------------
 # Telegram Bot API helpers
 # ---------------------------------------------------------------------------
 
-async def _send_message(text: str) -> dict:
+
+async def _send_message(text: str) -> int:
+    """Send a message via Telegram.  Returns the outgoing message_id."""
     token = _get_token()
     chat_id = _get_chat_id()
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-            },
+            json={"chat_id": chat_id, "text": text},
         )
-        return resp.json()
+        data = resp.json()
+    return data.get("result", {}).get("message_id", 0)
 
 
 async def _poll_updates(state: dict, timeout: int = 10) -> list:
@@ -124,34 +164,131 @@ def _is_command(text: str) -> bool:
     return text.startswith("/")
 
 
-async def _handle_commands(updates: list, state: dict) -> list:
-    """Process /away, /back, /status commands from Telegram.
+def _get_reply_to_id(update: dict) -> int | None:
+    """Extract the message_id this update is replying to, if any."""
+    reply_to = update.get("message", {}).get("reply_to_message")
+    if reply_to:
+        return reply_to.get("message_id")
+    return None
 
-    Returns the remaining non-command updates.
+
+async def _process_updates(updates: list, state: dict) -> list[dict]:
+    """Classify and route incoming updates.
+
+    - Commands (``/away``, ``/back``, ``/status``) are handled immediately.
+    - Threaded replies are stored in ``state["pending_replies"]`` keyed by
+      the message_id they reply to, so the originating session can find them.
+    - Returns the remaining *unthreaded* non-command updates.
     """
-    non_command: list = []
+    unthreaded: list[dict] = []
     for update in updates:
-        text = update.get("message", {}).get("text", "")
-        if text.strip() == "/away":
+        text = (update.get("message", {}).get("text", "") or "").strip()
+        if not text:
+            continue
+
+        # Commands are always processed, regardless of threading
+        if text == "/away":
             state["away"] = True
             _save_state(state)
             await _send_message("Away mode activated from Telegram.")
-        elif text.strip() == "/back":
+        elif text == "/back":
             state["away"] = False
             _save_state(state)
             await _send_message("Away mode deactivated. Welcome back!")
-        elif text.strip() == "/status":
+        elif text == "/status":
             status = "Active" if state.get("away") else "Inactive"
             project = state.get("project") or "none"
             await _send_message(f"Status: {status}\nProject: {project}")
         elif not _is_command(text):
-            non_command.append(update)
-    return non_command
+            reply_to_id = _get_reply_to_id(update)
+            if reply_to_id is not None:
+                _store_pending_reply(state, reply_to_id, text)
+            else:
+                unthreaded.append(update)
+    return unthreaded
+
+
+def _texts_from_updates(updates: list[dict]) -> list[str]:
+    """Extract non-empty message texts from a list of updates."""
+    return [
+        u.get("message", {}).get("text", "")
+        for u in updates
+        if u.get("message", {}).get("text", "")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Polling helpers for send_question / send_summary
+# ---------------------------------------------------------------------------
+
+
+async def _poll_for_replies(
+    state: dict,
+    my_msg_id: int,
+    timeout: int,
+    *,
+    follow_up_window: int = 3,
+) -> tuple[list[str], bool]:
+    """Poll until replies to ``my_msg_id`` arrive or timeout expires.
+
+    Returns ``(collected_replies, got_reply)``.  Unthreaded messages
+    encountered during polling are buffered in state.
+    """
+    collected: list[str] = []
+    start = time.monotonic()
+
+    while time.monotonic() - start < timeout:
+        # Check pending_replies first (another session may have stored ours)
+        state_fresh = _load_state()
+        # Merge the fresh pending_replies into our working state
+        state["pending_replies"] = state_fresh.get("pending_replies", {})
+        found = _collect_pending_replies(state, my_msg_id)
+        if found:
+            collected.extend(found)
+
+        if collected:
+            # Got replies — do a brief follow-up poll for multi-message
+            try:
+                extras = await _poll_updates(state, timeout=follow_up_window)
+                unthreaded = await _process_updates(extras, state)
+                _buffer_messages(state, _texts_from_updates(unthreaded))
+                # Check if more replies to our message arrived
+                more = _collect_pending_replies(state, my_msg_id)
+                collected.extend(more)
+            except Exception:
+                pass
+            _save_state(state)
+            return collected, True
+
+        # Poll Telegram for new updates
+        remaining = timeout - (time.monotonic() - start)
+        wait = min(10, int(remaining))
+        if wait <= 0:
+            break
+
+        try:
+            updates = await _poll_updates(state, timeout=wait)
+        except Exception:
+            continue
+
+        unthreaded = await _process_updates(updates, state)
+        _buffer_messages(state, _texts_from_updates(unthreaded))
+        _save_state(state)
+
+        # Check if _process_updates routed a reply to our message
+        found = _collect_pending_replies(state, my_msg_id)
+        if found:
+            collected.extend(found)
+            # Continue to top of loop — will hit the follow-up poll
+
+    _save_state(state)
+    return collected, bool(collected)
 
 
 # ---------------------------------------------------------------------------
 # MCP Tools
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 async def setup_check() -> str:
@@ -191,10 +328,8 @@ async def setup_check() -> str:
         chat = u.get("message", {}).get("chat", {})
         cid = str(chat.get("id", ""))
         if cid:
-            title = (
-                chat.get("title")
-                or chat.get("first_name", "")
-                + (" " + chat.get("last_name", "") if chat.get("last_name") else "")
+            title = chat.get("title") or chat.get("first_name", "") + (
+                " " + chat.get("last_name", "") if chat.get("last_name") else ""
             )
             chats_seen[cid] = title.strip()
 
@@ -238,13 +373,11 @@ async def set_away_mode(active: bool, project: str = "") -> str:
         await _send_message(
             f"{_msg_header(state, 'Away mode ON')}\n\n"
             f"I will send questions and updates here.\n"
+            f"Reply to a specific message to route your answer to the right session.\n"
             f"Commands: /back  /status"
         )
         _save_state(state)
-        return (
-            f"Away mode activated. Project: {project_name}. "
-            "Telegram notifications enabled."
-        )
+        return f"Away mode activated. Project: {project_name}. Telegram notifications enabled."
     else:
         await _send_message(f"{_msg_header(state, 'Away mode OFF')}\n\nBack at the terminal.")
         _save_state(state)
@@ -258,36 +391,22 @@ async def send_question(question: str, timeout: int = 300) -> str:
     Only works when away mode is active.  Use this *instead of* asking
     in the terminal when the user is away.  The tool blocks (polls) until
     a reply arrives or the timeout expires.
+
+    The user should swipe-reply to this specific message on Telegram.
+    This ensures the reply is routed to the correct session when multiple
+    Claude instances are running concurrently.
     """
     state = _load_state()
     if not state.get("away"):
-        return (
-            "Away mode is not active. "
-            "Ask the user directly in the terminal instead."
-        )
+        return "Away mode is not active. Ask the user directly in the terminal instead."
 
-    await _send_message(f"{_msg_header(state, 'Question')}\n\n{question}")
+    my_msg_id = await _send_message(f"{_msg_header(state, 'Question')}\n\n{question}")
 
-    start = time.monotonic()
-    while time.monotonic() - start < timeout:
-        remaining = timeout - (time.monotonic() - start)
-        wait = min(10, int(remaining))
-        if wait <= 0:
-            break
+    collected, got_reply = await _poll_for_replies(state, my_msg_id, timeout)
 
-        try:
-            updates = await _poll_updates(state, timeout=wait)
-        except Exception:
-            continue
+    if got_reply:
+        return "User responded: " + "\n".join(collected)
 
-        non_command = await _handle_commands(updates, state)
-        _save_state(state)
-
-        if non_command:
-            reply = non_command[0].get("message", {}).get("text", "")
-            return f"User responded: {reply}"
-
-    _save_state(state)
     return (
         f"No response received within {timeout} seconds. "
         "Consider moving to the next task or trying again later."
@@ -295,48 +414,72 @@ async def send_question(question: str, timeout: int = 300) -> str:
 
 
 @mcp.tool()
-async def send_summary(summary: str) -> str:
+async def send_summary(summary: str, poll_reply: int = 30) -> str:
     """Send a task-completion summary via Telegram.
 
     Only works when away mode is active.  Use after finishing a task or
     reaching a milestone so the user knows progress was made.
+
+    After sending, polls for up to ``poll_reply`` seconds to catch any
+    immediate response.  The user should swipe-reply to this specific
+    message so the reply is routed to the correct session.
     """
     state = _load_state()
     if not state.get("away"):
-        return (
-            "Away mode is not active. "
-            "Communicate with the user directly in the terminal."
-        )
+        return "Away mode is not active. Communicate with the user directly in the terminal."
 
-    await _send_message(f"{_msg_header(state, 'Task complete')}\n\n{summary}")
-    return "Summary sent via Telegram."
+    my_msg_id = await _send_message(f"{_msg_header(state, 'Task complete')}\n\n{summary}")
+
+    collected, got_reply = await _poll_for_replies(state, my_msg_id, poll_reply)
+
+    if got_reply:
+        return "Summary sent. User replied: " + "\n".join(collected)
+
+    return "Summary sent via Telegram. No immediate reply."
 
 
 @mcp.tool()
 async def check_messages(timeout: int = 10) -> str:
     """Check for new messages / instructions from the user on Telegram.
 
-    Only works when away mode is active.  Use after sending a summary to
-    see if the user replied with follow-up instructions, or periodically
-    during long autonomous work.
+    Always processes Telegram commands (/away, /back, /status) so the
+    user can remotely activate away mode.  Regular unthreaded messages
+    are only returned when away mode is active.
+
+    Threaded replies (swipe-replies to a specific message) are routed
+    to the session that sent the original message, not returned here.
+
+    Use after sending a summary to see if the user replied with follow-up
+    instructions, or periodically during long autonomous work.
     """
     state = _load_state()
-    if not state.get("away"):
-        return "Away mode is not active. Ask the user directly in the terminal."
 
     try:
         updates = await _poll_updates(state, timeout=timeout)
     except Exception as exc:
+        _save_state(state)
         return f"Error checking messages: {exc}"
 
-    non_command = await _handle_commands(updates, state)
+    unthreaded = await _process_updates(updates, state)
+    was_away = state.get("away", False)
+
+    if not was_away and state.get("away"):
+        _save_state(state)
+        return "Away mode was activated remotely from Telegram."
+
+    if not was_away:
+        _save_state(state)
+        return "Away mode is not active. Ask the user directly in the terminal."
+
+    # Collect unthreaded messages from buffer + current poll
+    buffered = _drain_buffer(state)
+    live = _texts_from_updates(unthreaded)
+    all_messages = buffered + live
+
     _save_state(state)
 
-    if non_command:
-        messages = [
-            u.get("message", {}).get("text", "") for u in non_command
-        ]
-        return "New messages:\n" + "\n".join(f"- {m}" for m in messages)
+    if all_messages:
+        return "New messages:\n" + "\n".join(f"- {m}" for m in all_messages)
 
     return "No new messages."
 
@@ -344,6 +487,7 @@ async def check_messages(timeout: int = 10) -> str:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main():
     mcp.run()
