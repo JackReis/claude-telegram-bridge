@@ -120,3 +120,6 @@ GitHub Actions workflow at `.github/workflows/ci.yml`:
 - **Long polling**: Uses Telegram's `getUpdates` with server-side timeout (efficient, no webhook infrastructure needed)
 - **State file**: Simple JSON file shared between concurrent MCP instances
 - **Plain text messages**: No Markdown in Telegram messages to avoid parsing issues with special characters
+
+## SESSION LOGGING
+Mandatory Requirement: Maintain immaculate session logs across ALL repositories in the ecosystem. Every session must result in a detailed log in 'logs/sessions/YYYY-MM/' (or the repository's designated log directory), capturing objectives, achievements, changes committed, and next actions. This is a core responsibility of both Neo (Orchestrator) and PT (Lead Engineer) to preserve context and ensure seamless multi-session coordination.
