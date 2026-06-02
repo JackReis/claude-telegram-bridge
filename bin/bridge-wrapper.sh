@@ -1,5 +1,5 @@
 #!/bin/bash
-set -eu
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
@@ -7,21 +7,28 @@ cd "$(dirname "$0")/.."
 SOPS_CFG="$HOME/.secrets/.sops.yaml"
 SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
 
-if [ -f "$SOPS_AGE_KEY_FILE" ] && [ -f ~/.secrets/openclaw-runtime.env ]; then
-  TOKEN=$(SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops --config "$SOPS_CFG" \
-    -d ~/.secrets/openclaw-runtime.env 2>/dev/null | \
-    grep '^CLAUDE_CODE_BRIDGE_TELEGRAM_BOT_TOKEN=' | cut -d= -f2- | tr -d '\n')
-  if [ -n "$TOKEN" ] && [ "${#TOKEN}" -gt 20 ]; then
-    export TELEGRAM_BOT_TOKEN="$TOKEN"
-  else
-    echo "ERROR: CLAUDE_CODE_BRIDGE_TELEGRAM_BOT_TOKEN missing or invalid in SOPS" >&2
-    echo "  Fix: Get a real BotFather token and add it to ~/.secrets/openclaw-runtime.env" >&2
-    exit 1
+if [ -z "${CLAUDE_TELEGRAM_BOT_TOKEN:-}" ] && [ "${CLAUDE_TELEGRAM_BRIDGE_DISABLE_SOPS:-0}" != "1" ]; then
+  if [ -f "$SOPS_AGE_KEY_FILE" ] && [ -f ~/.secrets/openclaw-runtime.env ]; then
+    CLAUDE_TELEGRAM_BOT_TOKEN=$(SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops --config "$SOPS_CFG" \
+      -d ~/.secrets/openclaw-runtime.env 2>/dev/null | \
+      grep '^CLAUDE_CODE_BRIDGE_TELEGRAM_BOT_TOKEN=' | cut -d= -f2- | tr -d '\n')
   fi
-else
-  echo "ERROR: SOPS key or secrets file missing" >&2
-  exit 1
 fi
+
+if [ -z "${CLAUDE_TELEGRAM_BOT_TOKEN:-}" ]; then
+  echo "claude-telegram-bridge: CLAUDE_TELEGRAM_BOT_TOKEN is required." >&2
+  echo "Refusing to use TELEGRAM_BOT_TOKEN because that may belong to Zoe/OpenClaw." >&2
+  exit 78
+fi
+
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ "$TELEGRAM_BOT_TOKEN" = "$CLAUDE_TELEGRAM_BOT_TOKEN" ]; then
+  echo "claude-telegram-bridge: CLAUDE_TELEGRAM_BOT_TOKEN must not equal TELEGRAM_BOT_TOKEN." >&2
+  echo "Refusing to share Zoe/OpenClaw's Telegram token." >&2
+  exit 78
+fi
+
+TELEGRAM_BOT_TOKEN="$CLAUDE_TELEGRAM_BOT_TOKEN"
+export TELEGRAM_BOT_TOKEN
 
 export TELEGRAM_CHAT_ID="7618822262"
 
