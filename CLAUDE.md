@@ -127,7 +127,7 @@ Mandatory Requirement: Maintain immaculate session logs across ALL repositories 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **claude-telegram-bridge** (150 symbols, 253 relationships, 20 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **claude-telegram-bridge** (161 symbols, 263 relationships, 20 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -154,6 +154,10 @@ This project is indexed by GitNexus as **claude-telegram-bridge** (150 symbols, 
 | `gitnexus://repo/claude-telegram-bridge/clusters` | All functional areas |
 | `gitnexus://repo/claude-telegram-bridge/processes` | All execution flows |
 | `gitnexus://repo/claude-telegram-bridge/process/{name}` | Step-by-step execution trace |
+
+## Cross-Repo Groups
+
+This repository is listed under GitNexus **group(s): fleet** (see `~/.gitnexus/groups/`). For cross-repo analysis, use MCP tools `impact`, `query`, and `context` with `repo` set to `@<groupName>` or `@<groupName>/<memberPath>` (paths match keys in that group’s `group.yaml`). Use `group_list` / `group_sync` for membership and sync. From the terminal: `npx gitnexus group list`, `npx gitnexus group sync <name>`, `npx gitnexus group impact <name> --target <symbol> --repo <group-path>`.
 
 ## CLI
 

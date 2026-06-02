@@ -50,7 +50,7 @@ uv sync
 Create a `.envrc` file in the project root:
 
 ```bash
-export TELEGRAM_BOT_TOKEN="your-bot-token-here"
+export CLAUDE_TELEGRAM_BOT_TOKEN="your-claude-specific-bot-token-here"
 export TELEGRAM_CHAT_ID="your-chat-id-here"
 ```
 
@@ -72,7 +72,7 @@ Add to your Claude Code MCP config (`~/.claude.json`):
   "mcpServers": {
     "telegram-bridge": {
       "command": "/bin/bash",
-      "args": ["-c", "source /path/to/claude-telegram-bridge/.envrc && uv run --directory /path/to/claude-telegram-bridge claude-telegram-bridge"]
+      "args": ["/path/to/claude-telegram-bridge/bin/bridge-wrapper.sh"]
     }
   }
 }
@@ -151,6 +151,7 @@ The bridge is designed so you don't lose messages, even with multiple sessions:
 - **Reply-to threading** — Uses Telegram's native `reply_to_message` field to route replies to the correct session. No session IDs or user-facing prefixes.
 - **Shared state file** — `~/.claude/telegram-bridge-state.json` is shared between concurrent MCP instances. Contains away mode, update offset, message buffer, and pending replies.
 - **Long polling** — Uses Telegram's `getUpdates` with server-side timeouts. No webhook infrastructure needed.
+- **Token isolation** — Claude Code must use `CLAUDE_TELEGRAM_BOT_TOKEN`. The wrapper refuses to fall back to `TELEGRAM_BOT_TOKEN` so it cannot compete with Zoe/OpenClaw's gateway token.
 - **Command processing** — `check_messages` always processes `/away`, `/back`, `/status` commands regardless of away mode state, enabling remote activation.
 - **Plain text** — Messages use plain text (no Markdown) to avoid parsing issues with special characters in project names or summaries.
 
