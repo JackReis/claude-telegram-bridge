@@ -79,11 +79,17 @@ State persisted at `~/.claude/telegram-bridge-state.json`:
 
 ## MCP Server Config
 
-Registered in `~/.claude.json` under `mcpServers.telegram-bridge`:
+Register in `~/.claude.json` under `mcpServers.telegram-bridge` with the wrapper:
 ```
-command: /bin/bash -c "source .envrc && uv run claude-telegram-bridge"
-env: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (loaded from .envrc)
+command: /bin/bash
+args: ["/Users/jack.reis/Documents/claude-telegram-bridge/bin/bridge-wrapper.sh"]
 ```
+
+The wrapper loads `CLAUDE_CODE_BRIDGE_TELEGRAM_BOT_TOKEN` and
+`CLAUDE_CODE_BRIDGE_TELEGRAM_CHAT_ID` from `~/.secrets/openclaw-runtime.env`
+via SOPS, exports them as the runtime `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID`, and refuses to fall back to Zoe/OpenClaw's generic
+`TELEGRAM_BOT_TOKEN`.
 
 ## Development
 
